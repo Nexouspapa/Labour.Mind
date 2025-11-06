@@ -1,4 +1,6 @@
 import streamlit as st
+import os
+import requests
 import pandas as pd
 import sqlite3
 import matplotlib.pyplot as plt
@@ -126,12 +128,15 @@ st.plotly_chart(fig, use_container_width=True)
 
 # Smart Summary using Hugging Face summarizer
 st.subheader("🧠 AI-Generated Summary ")
-from transformers import pipeline
-@st.cache_resource
-def get_summary_generator():
-    return pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+HF_API_TOKEN = os.environ.get("HF_API_TOKEN")  # stored securely in Streamlit secrets
+API_URL = "https://api-inference.huggingface.co/models/sshleifer/distilbart-cnn-12-6"
+headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
 
-summarizer = get_summary_generator()
-summary_input = filtered_df[['Estimated Unemployment Rate (%)', 'Estimated Employed', 'Estimated Labour Participation Rate (%)']].describe().to_string()
-summary = summarizer(summary_input, max_length=130, min_length=30, do_sample=False)[0]['summary_text']
+@st.cache_resource
+def summarize_text(text, max_length=150, min_length=40):
+    payload = {"inputs": text, "parameters": {"max_length": max_length, "min_length": min_length}}
+    response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+    response.raise_for_status()
+    return response.json()[0]['summary_text']
+summary = summarize_text(summary_input)
 st.info(summary)
