@@ -1,4 +1,5 @@
 # Labour.Mind
+https://labourmind-uwvjgqkcb4bmfuwvi6mwos.streamlit.app/
 # Unemployment & Economic Insights Dashboard  
 ### A Streamlit-Powered Data Analysis and Forecasting App with AI-Generated Summaries  
 
