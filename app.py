@@ -126,90 +126,94 @@ st.plotly_chart(fig, use_container_width=True)
 
 # Smart Summary using Hugging Face summarizer
 
+# Replace previous summarize_text_remote with this (uses new HF router endpoint)
 import os
 import requests
 import streamlit as st
 
-# Hugging Face settings (set HF_API_TOKEN in Streamlit Secrets)
 HF_API_TOKEN = os.environ.get("HF_API_TOKEN")
-API_URL = "https://api-inference.huggingface.co/models/sshleifer/distilbart-cnn-12-6"
-HEADERS = {"Authorization": f"Bearer {HF_API_TOKEN}"} if HF_API_TOKEN else {}
+ROUTER_URL = "https://router.huggingface.co/hf-inference"
+HEADERS = {"Authorization": f"Bearer {HF_API_TOKEN}", "Content-Type": "application/json"} if HF_API_TOKEN else {}
+
+def local_fallback_summary(text: str, n_sentences: int = 3) -> str:
+    """Very small, deterministic fallback summary (no external API)."""
+    # Simple heuristic: take first n_sentences from text (split by periods)
+    parts = [p.strip() for p in text.split('.') if p.strip()]
+    if not parts:
+        return "No textual data available to summarize."
+    return '. '.join(parts[:n_sentences]) + ('.' if len(parts) >= n_sentences else '')
 
 @st.cache_resource
-def summarize_text_remote(text: str, max_length: int = 150, min_length: int = 40, timeout: int = 60):
-    """Call Hugging Face Inference API to summarize text. Raises on HTTP errors."""
+def summarize_text_remote_router(text: str, model: str = "sshleifer/distilbart-cnn-12-6",
+                                 max_length: int = 150, min_length: int = 40, timeout: int = 60) -> str:
+    """
+    Summarize text using Hugging Face Router API:
+    POST https://router.huggingface.co/hf-inference
+    Payload: { "model": "<model-id>", "inputs": "...", "parameters": {...} }
+    """
     if not HF_API_TOKEN:
-        raise RuntimeError("HF_API_TOKEN not set. Add it to Streamlit Secrets.")
-    payload = {"inputs": text, "parameters": {"max_length": max_length, "min_length": min_length}}
-    resp = requests.post(API_URL, headers=HEADERS, json=payload, timeout=timeout)
+        raise RuntimeError("HF_API_TOKEN not set. Add it in Streamlit Secrets.")
+
+    payload = {
+        "model": model,
+        "inputs": text,
+        "parameters": {"max_length": max_length, "min_length": min_length}
+    }
+
+    resp = requests.post(ROUTER_URL, headers=HEADERS, json=payload, timeout=timeout)
+
+    # If model removed or router returns 410/404, raise for handling below
     resp.raise_for_status()
     result = resp.json()
-    # Typical response shape: [{ "summary_text": "..." }]
-    if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and "summary_text" in result[0]:
-        return result[0]["summary_text"]
-    if isinstance(result, dict) and "summary_text" in result:
-        return result["summary_text"]
+
+    # Router returns a list of possible outputs or an object; handle common shapes
+    # Typical successful shape: [{"generated_text": "..."}] OR [{"summary_text":"..."}] OR {"error": "..."}
+    if isinstance(result, list) and len(result) > 0:
+        first = result[0]
+        if isinstance(first, dict):
+            for key in ("summary_text", "generated_text", "text"):
+                if key in first:
+                    return first[key]
+            # last resort: return joined dict text
+            return str(first)
+        return str(first)
+    if isinstance(result, dict):
+        # sometimes the router returns {"error": "..."} or {"summary_text": "..."}
+        if "summary_text" in result:
+            return result["summary_text"]
+        if "generated_text" in result:
+            return result["generated_text"]
+        if "error" in result:
+            raise RuntimeError(f"HuggingFace Router Error: {result['error']}")
+        return str(result)
+
     return str(result)
 
-# Ensure 'filtered_df' exists. If not, fall back to entire 'df'. Replace names if your app uses different variable names.
-try:
-    # if the app created filtered_df earlier from user selections, use it; otherwise fall back
-    if "filtered_df" in globals() and filtered_df is not None:
-        df_for_summary = filtered_df.copy()
-    else:
-        df_for_summary = df.copy()  # fallback to full dataset
-
-    st.subheader("AI-Generated Summary")
-
-    # Choose which numeric columns to include (adapt these to your dataset column names)
-    cols_for_summary = [
-        'Estimated Unemployment Rate (%)',
-        'Estimated Employed',
-        'Estimated Labour Participation Rate (%)',
-        'Literacy Rate (%)',
-        'GDP per Capita'
-    ]
-    # Keep only existing columns
-    cols_existing = [c for c in cols_for_summary if c in df_for_summary.columns]
-
-    if df_for_summary.empty:
-        st.info("No data available to summarize for the selected filters.")
-    elif len(cols_existing) == 0:
-        st.info("No matching numeric columns found to summarize. Check column names.")
-    else:
-        # Build a human-readable summary input string
-        summary_stats = df_for_summary[cols_existing].describe().to_string()
-        # If you have state/date info, include it
-        header_parts = []
-        if "State" in df_for_summary.columns:
-            header_parts.append("State(s): " + ", ".join(map(str, df_for_summary['State'].unique()[:10])))
-        if "Date" in df_for_summary.columns:
-            min_date = df_for_summary['Date'].min()
-            max_date = df_for_summary['Date'].max()
-            header_parts.append(f"Date range: {min_date.date()} to {max_date.date()}")
-        header = " | ".join(header_parts)
-        summary_input = (header + "\n\n" + summary_stats) if header else summary_stats
-
-        # Call the remote summarizer and display
+# Example usage integration (defensive wrapper)
+def get_ai_summary_or_fallback(text_for_summary: str) -> str:
+    try:
+        with st.spinner("Generating AI summary..."):
+            return summarize_text_remote_router(text_for_summary)
+    except requests.HTTPError as http_err:
+        # Common HTTP error cases: 410 (gone), 403 (forbidden), 429 (rate limit)
+        st.error(f"Summarization API error: {http_err}")
         try:
-            with st.spinner("Generating AI summary..."):
-                ai_summary = summarize_text_remote(summary_input, max_length=150, min_length=40)
-            st.info(ai_summary)
-        except RuntimeError as e:
-            st.error(str(e))
-            st.write("Make sure HF_API_TOKEN is set in Streamlit Secrets.")
-        except requests.HTTPError as e:
-            st.error(f"Summarization API error: {e}")
-            st.write("Response:", getattr(e.response, "text", "no details"))
-        except Exception as e:
-            st.error("Unexpected error while generating summary.")
-            st.write(repr(e))
+            # Show server response body if available (safe for logs/preview)
+            st.write("Response:", http_err.response.text)
+        except Exception:
+            pass
+        # Fallback to local summarizer
+        st.warning("Using local fallback summary due to remote API error.")
+        return local_fallback_summary(text_for_summary)
+    except RuntimeError as e:
+        st.error(str(e))
+        st.warning("Using local fallback summary.")
+        return local_fallback_summary(text_for_summary)
+    except Exception as e:
+        st.error("Unexpected error calling summarization API.")
+        st.write(repr(e))
+        return local_fallback_summary(text_for_summary)
 
-except NameError:
-    st.warning("filtered_df or df not defined. Ensure this summary block is placed after data filtering code.")
-except Exception as e:
-    st.error("Error preparing AI summary.")
-    st.write(repr(e))
 
 
 
